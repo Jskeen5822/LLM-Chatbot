@@ -20,7 +20,7 @@ st.set_page_config(page_title="Gemini Personal Assistant", page_icon="🤖", lay
 st.title("Gemini Personal Assistant")
 
 if "api_key" not in st.session_state:
-    st.session_state.api_key = os.getenv("AIzaSyCuPpv5ig3odOJuSi7FiQef8jnaDqRqxdo", "")
+    st.session_state.api_key = os.getenv("", "")
 
 if "assistant" not in st.session_state:
     st.session_state.assistant = _init_assistant(st.session_state.api_key)
