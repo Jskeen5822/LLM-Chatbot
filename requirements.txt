@@ -1,0 +1,5 @@
+google-generativeai>=0.7.2
+streamlit>=1.38.0
+Pillow>=10.3.0
+requests>=2.31.0
+python-dateutil>=2.9.0
