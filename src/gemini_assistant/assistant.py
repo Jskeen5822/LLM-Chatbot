@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import google.generativeai as genai
 import requests
 from dateutil import parser as date_parser
+from google.api_core.exceptions import GoogleAPIError
 
 from .tools import TOOL_NAMES, build_tool_spec
 
@@ -55,12 +56,12 @@ class GeminiAssistant:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-1.5-flash",
-        image_model_name: str = "imagen-3.0-light",
+        model_name: str = "gemini-2.0-flash",
+        image_model_name: str = "gemini-2.0-flash-exp-image-generation",
     ) -> None:
-        key = api_key or os.getenv("GOOGLE_API_KEY")
+        key = (api_key or os.getenv("GOOGLE_API_KEY") or "").strip()
         if not key:
-            raise RuntimeError("GOOGLE_API_KEY environment variable is not set.")
+            raise RuntimeError("GOOGLE_API_KEY environment variable is not set or is empty.")
 
         genai.configure(api_key=key)
         self._text_model = genai.GenerativeModel(
@@ -76,6 +77,8 @@ class GeminiAssistant:
             ).strip(),
         )
         self._image_model = genai.GenerativeModel(model_name=image_model_name)
+        self.text_model_name = self._text_model.model_name
+        self.image_model_name = self._image_model.model_name
         self._state = AssistantState()
         self._history: List[Dict[str, Any]] = []
 
@@ -107,13 +110,17 @@ class GeminiAssistant:
 
         # Gemini expects aspect ratio inside a tool config for image generation.
         tool_config = {
-            "image_generation_config": {"aspect_ratio": aspect_ratio}
+            "function_calling_config": {"mode": "ANY"},
+            "image_generation_config": {"aspect_ratio": aspect_ratio},
         }
-        resp = self._image_model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "image/png"},
-            tool_config=tool_config,
-        )
+        try:
+            resp = self._image_model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "image/png"},
+                tool_config=tool_config,
+            )
+        except GoogleAPIError as exc:
+            raise RuntimeError(self._format_api_error(exc)) from exc
 
         parts = resp.candidates[0].content.parts
         for part in parts:
@@ -134,12 +141,21 @@ class GeminiAssistant:
         """Call Gemini repeatedly until no more tool calls are requested."""
 
         while True:
-            response = self._text_model.generate_content(
-                contents=self._history,
-            )
+            try:
+                response = self._text_model.generate_content(
+                    contents=self._history,
+                )
+            except GoogleAPIError as exc:
+                message = self._format_api_error(exc)
+                error_message = {
+                    "role": "model",
+                    "parts": [{"text": message}],
+                }
+                self._history.append(error_message)
+                return error_message
 
             candidate = response.candidates[0]
-            model_message = self._content_to_dict(candidate.content)
+            model_message = self._content_to_message(candidate.content)
             self._history.append(model_message)
 
             function_calls = self._extract_function_calls(model_message)
@@ -334,10 +350,51 @@ class GeminiAssistant:
         texts = [part.get("text", "") for part in parts if "text" in part]
         return "\n".join(filter(None, (text.strip() for text in texts)))
 
-    def _content_to_dict(self, content: Any) -> Dict[str, Any]:
+    def _content_to_message(self, content: Any) -> Dict[str, Any]:
         if isinstance(content, dict):
             return content
-        # The SDK returns a proto-backed object; rely on its built-in to_dict when available.
+
+        if hasattr(content, "role") and hasattr(content, "parts"):
+            return {
+                "role": getattr(content, "role", "model"),
+                "parts": [self._part_to_dict(part) for part in content.parts],
+            }
+
         if hasattr(content, "to_dict"):
             return content.to_dict()
+
         raise TypeError(f"Unsupported content representation: {type(content)!r}")
+
+    def _part_to_dict(self, part: Any) -> Dict[str, Any]:
+        if isinstance(part, dict):
+            return part
+
+        if hasattr(part, "function_call") and part.function_call:
+            fn_call = part.function_call
+            call_dict = {
+                "name": fn_call.name,
+                "args": dict(fn_call.args or {}),
+            }
+            return {"function_call": call_dict}
+
+        if hasattr(part, "inline_data") and part.inline_data:
+            inline = part.inline_data
+            data = inline.get("data") if isinstance(inline, dict) else getattr(inline, "data", None)
+            mime = inline.get("mime_type") if isinstance(inline, dict) else getattr(inline, "mime_type", None)
+            return {"inline_data": {"data": data, "mime_type": mime}}
+
+        if hasattr(part, "text"):
+            return {"text": part.text}
+
+        if hasattr(part, "to_dict"):
+            return part.to_dict()
+
+        raise TypeError(f"Unsupported part representation: {type(part)!r}")
+
+    def _format_api_error(self, exc: GoogleAPIError) -> str:
+        description = getattr(exc, "message", None) or str(exc)
+        return (
+            "I ran into an issue reaching the Gemini API. "
+            "Please verify that your API key is valid and try again. "
+            f"Details: {description}"
+        )

@@ -10,7 +10,7 @@ def _init_assistant(api_key: Optional[str]) -> Optional[GeminiAssistant]:
     if not api_key:
         return None
     try:
-        return GeminiAssistant(api_key=api_key)
+        return GeminiAssistant(api_key=api_key.strip())
     except RuntimeError as exc:
         st.error(str(exc))
         return None
@@ -20,7 +20,7 @@ st.set_page_config(page_title="Gemini Personal Assistant", page_icon="🤖", lay
 st.title("Gemini Personal Assistant")
 
 if "api_key" not in st.session_state:
-    st.session_state.api_key = os.getenv("", "")
+    st.session_state.api_key = os.getenv("GOOGLE_API_KEY", "").strip()
 
 if "assistant" not in st.session_state:
     st.session_state.assistant = _init_assistant(st.session_state.api_key)
@@ -32,8 +32,9 @@ with st.sidebar:
     st.header("Setup")
     new_key = st.text_input("Google API key", type="password", value=st.session_state.api_key)
     if st.button("Apply key"):
-        st.session_state.api_key = new_key
-        st.session_state.assistant = _init_assistant(new_key)
+        sanitized_key = new_key.strip()
+        st.session_state.api_key = sanitized_key
+        st.session_state.assistant = _init_assistant(sanitized_key)
         st.session_state.chat_history = []
         if st.session_state.assistant:
             st.success("API key updated and assistant ready.")
